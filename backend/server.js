@@ -27,6 +27,7 @@ app.use(morgan('dev'));
 // ---------- Basic Auth (opcional) ----------
 const BASIC_USER = process.env.BASIC_AUTH_USER || null;
 const BASIC_PASS = process.env.BASIC_AUTH_PASS || null;
+const DEFAULT_SYSTEM_PROMPT = (process.env.SYSTEM_PROMPT || '').trim() || null;
 function requireBasicAuth(req, res, next) {
   if (!BASIC_USER || !BASIC_PASS) return next();
   const header = req.headers.authorization || '';
@@ -56,6 +57,7 @@ function createSession(mode = process.env.SESSION_MODE || 'mixed') {
     id,
     condition: pick,
     createdAt: new Date().toISOString(),
+    systemPrompt: DEFAULT_SYSTEM_PROMPT,
     messages: [],
     awaitingOperator: false,
   };
@@ -74,29 +76,34 @@ function isAwaitingOperator(session) {
 }
 
 // ---------- IA (stub/Gemini) ----------
-async function askGemini(prompt, history = []) {
+async function askGemini(prompt, history = [], systemPrompt = null) {
   if (!process.env.GEMINI_API_KEY) {
-    return `🧪 (Stub IA) Me pediste: "${prompt}". Configura GEMINI_API_KEY para usar Gemini.`;
+    return `🧪 (Stub IA) [system="${systemPrompt || '—'}"] ${prompt}`;
   }
-  const url =
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' +
-    process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
 
-  const contents = [
-    ...history.map((h) => ({
-      role: h.role === 'user' ? 'user' : 'model',
-      parts: [{ text: h.text }],
-    })),
-    { role: 'user', parts: [{ text: prompt }] },
-  ];
+  const body = {
+    contents: [
+      ...history.map(h => ({
+        role: h.role === 'user' ? 'user' : 'model',
+        parts: [{ text: h.text }]
+      })),
+      { role: 'user', parts: [{ text: prompt }] }
+    ],
+  };
+  if (systemPrompt) {
+    body.systemInstruction = { parts: [{ text: systemPrompt }] };
+  }
+
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents }),
+    body: JSON.stringify(body)
   });
   if (!r.ok) throw new Error(`Gemini HTTP ${r.status}: ${await r.text()}`);
   const data = await r.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || 'Sin respuesta del modelo.';
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || 'No obtuve respuesta del modelo.';
 }
 
 // ---------- Helpers ----------
@@ -112,7 +119,6 @@ app.get('/', (_req, res) => res.send('pong'));
 app.post('/api/session', (req, res) => {
   const mode = (req.query.mode || process.env.SESSION_MODE || 'mixed').toString();
   const s = createSession(mode);
-  console.log('[SESSION] nueva', { id: s.id, condition: s.condition });
   res.json({ sessionId: s.id, condition: s.condition });
 });
 
@@ -131,12 +137,11 @@ app.post('/api/chat', async (req, res) => {
     pushMessage(s, 'user', String(text).slice(0, 2000));
 
     if (s.condition === 'AI') {
-      const history = s.messages.filter((m) => m.role !== 'ai');
-      const reply = await askGemini(text, history);
-      pushMessage(s, 'ai', reply);
-      console.log('[CHAT] reply IA', { sessionId, reply: reply.slice(0, 60) + '...' });
-      return res.json({ reply, queued: false });
-    } else {
+  const history = s.messages.filter(m => m.role !== 'ai');
+  const reply = await askGemini(text, history, s.systemPrompt); // 👈 usa el prompt fijo
+  const msg = pushMessage(s, 'ai', reply);
+  return res.json({ reply, replyIndex: msg.i, queued: false });
+} else {
       s.awaitingOperator = true;
       console.log('[CHAT] queued para operador', { sessionId });
       return res.json({ queued: true });

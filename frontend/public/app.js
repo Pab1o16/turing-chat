@@ -62,7 +62,6 @@ form.addEventListener('submit', async (e) => {
 
   if (data.queued) {
   } else if (data.reply) {
-    addMsg('bot', data.reply);
   } else if (data.error) {
     addMsg('bot', '⚠️ Error: ' + data.error);
   }
