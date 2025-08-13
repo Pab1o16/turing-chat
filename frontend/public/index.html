@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Mini Prueba de Turing</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header>
+    <h1>🧩 Mini Prueba de Turing</h1>
+    <p class="notice">
+      Este es un experimento de chat. Podemos asignarte aleatoriamente a un operador humano o a un modelo de IA.
+      No compartas datos sensibles. Al finalizar podrás ver un <b>debrief</b>.
+    </p>
+  </header>
+
+  <main>
+    <div id="chat"></div>
+
+    <div id="typing" class="typing hidden">
+      <span></span><span></span><span></span> escribiendo…
+    </div>
+
+    <form id="form">
+      <input id="input" type="text" placeholder="Escribe tu mensaje…" autocomplete="off" />
+      <button>Enviar</button>
+    </form>
+
+    <div class="actions">
+      <button id="btnDebrief">Finalizar y ver debrief</button>
+    </div>
+  </main>
+
+  <footer>
+    <small>Hecho para planes gratis (Render + Netlify). Respuestas de IA usan Gemini si configuras GEMINI_API_KEY en tu backend.</small>
+  </footer>
+
+  <script src="./app.js"></script>
+</body>
+</html>

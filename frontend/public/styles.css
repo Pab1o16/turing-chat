@@ -1,0 +1,20 @@
+:root { font-family: system-ui, sans-serif; }
+body { margin: 0; background: #0b0f19; color: #e6e8f2; }
+header, footer { padding: 12px 16px; background: #11162a; }
+.notice { color: #c4c9ff; }
+main { padding: 16px; display: grid; gap: 12px; max-width: 800px; margin: auto; }
+#chat { min-height: 380px; background: #0f1427; border: 1px solid #30395f; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.msg { padding: 8px 10px; border-radius: 8px; max-width: 80%; }
+.user { background: #241948; align-self: flex-start; }
+.bot  { background: #183d2b; align-self: flex-end; }
+#form { display: flex; gap: 8px; }
+#input { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid #30395f; background: #0f1427; color: #fff; }
+button { padding: 10px 14px; border-radius: 6px; border: 1px solid #30395f; background: #1b2140; color: white; cursor: pointer; }
+button:hover { background: #222a56; }
+
+.typing { display:flex; align-items:center; gap:6px; opacity:.9; }
+.typing.hidden { display:none; }
+.typing span { width:6px; height:6px; background:#c4c9ff; border-radius:50%; display:inline-block; animation: blink 1.2s infinite; }
+.typing span:nth-child(2){ animation-delay:.2s; }
+.typing span:nth-child(3){ animation-delay:.4s; }
+@keyframes blink { 0%,80%,100%{ opacity:.2 } 40%{ opacity:1 } }

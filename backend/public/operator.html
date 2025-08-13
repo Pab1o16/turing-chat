@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Panel Operador</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/operator/operator.css" />
+</head>
+<body>
+  <header>
+    <h1>👩‍💻 Panel del Operador</h1>
+    <p>Responde sesiones asignadas a <b>humano</b>. (Se actualiza por polling)</p>
+  </header>
+
+  <main>
+    <section>
+      <h2>📥 Bandeja</h2>
+      <div id="inbox"></div>
+    </section>
+
+    <section>
+      <h2>💬 Conversación</h2>
+      <div id="chat"></div>
+      <form id="replyForm">
+        <input type="text" id="replyText" placeholder="Escribe tu respuesta..." autocomplete="off" />
+        <button>Responder</button>
+      </form>
+    </section>
+  </main>
+
+  <footer>
+    <small>Protege este panel con BASIC_AUTH_USER/PASS en el backend.</small>
+  </footer>
+
+  <script src="/operator/operator.js"></script>
+</body>
+</html>
