@@ -9,30 +9,16 @@ import { nanoid } from 'nanoid';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ---------- CORS (Netlify -> Render) ----------
-// Usa tu dominio público de Netlify en CORS_ORIGIN, p.ej. https://tuapp.netlify.app
-const ORIGIN = process.env.CORS_ORIGIN || 'https://tuapp.netlify.app';
-
-// Importante: si no usas cookies ni auth de navegador en el frontend, deja credentials:false
+// ---------- CORS (permisivo, sin credenciales) ----------
 app.use(
   cors({
-    origin: ORIGIN === '*' ? true : ORIGIN,        // refleja el origin si es "*"
+    origin: '*',
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: false,                             // si lo pones true, NO uses "*"
+    credentials: false, // IMPORTANT: si usas '*', no uses credenciales
   })
 );
-
-// Respuestas al preflight (OPTIONS) para todas las rutas
-app.options(
-  '*',
-  cors({
-    origin: ORIGIN === '*' ? true : ORIGIN,
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: false,
-  })
-);
+app.options('*', cors());
 
 // Body + logs
 app.use(express.json({ limit: '1mb' }));
@@ -52,13 +38,7 @@ function requireBasicAuth(req, res, next) {
   return res.status(401).set('WWW-Authenticate', 'Basic').send('Credenciales inválidas');
 }
 
-// ---------- Memoria en RAM ----------
-/**
- * sessions Map: id -> {
- *   id, condition: 'AI'|'human', createdAt, messages: [{i,role:'user'|'ai'|'human',text,t}],
- *   awaitingOperator: boolean
- * }
- */
+// ---------- Memoria ----------
 const sessions = new Map();
 let globalIndex = 0;
 
@@ -72,7 +52,6 @@ function createSession(mode = process.env.SESSION_MODE || 'mixed') {
       : Math.random() < 0.5
       ? 'AI'
       : 'human';
-
   const s = {
     id,
     condition: pick,
@@ -83,28 +62,25 @@ function createSession(mode = process.env.SESSION_MODE || 'mixed') {
   sessions.set(id, s);
   return s;
 }
-
 function pushMessage(session, role, text) {
   const msg = { i: ++globalIndex, role, text, t: new Date().toISOString() };
   session.messages.push(msg);
   return msg;
 }
-
 function isAwaitingOperator(session) {
   if (session.condition !== 'human') return false;
   const last = session.messages[session.messages.length - 1];
   return !!last && last.role === 'user';
 }
 
-// ---------- IA (Gemini) ----------
+// ---------- IA (stub/Gemini) ----------
 async function askGemini(prompt, history = []) {
   if (!process.env.GEMINI_API_KEY) {
     return `🧪 (Stub IA) Me pediste: "${prompt}". Configura GEMINI_API_KEY para usar Gemini.`;
   }
-  const apiKey = process.env.GEMINI_API_KEY;
   const url =
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' +
-    apiKey;
+    process.env.GEMINI_API_KEY;
 
   const contents = [
     ...history.map((h) => ({
@@ -113,20 +89,14 @@ async function askGemini(prompt, history = []) {
     })),
     { role: 'user', parts: [{ text: prompt }] },
   ];
-
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ contents }),
   });
-  if (!r.ok) {
-    const txt = await r.text();
-    throw new Error(`Gemini HTTP ${r.status}: ${txt}`);
-  }
+  if (!r.ok) throw new Error(`Gemini HTTP ${r.status}: ${await r.text()}`);
   const data = await r.json();
-  const text =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || 'No obtuve respuesta del modelo.';
-  return text;
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || 'Sin respuesta del modelo.';
 }
 
 // ---------- Helpers ----------
@@ -136,12 +106,13 @@ const getSid = (req) =>
   (req.body && (req.body.sessionId || req.body.session));
 
 // ---------- Rutas públicas ----------
-app.get('/', (req, res) => res.send('pong'));
+app.get('/', (_req, res) => res.send('pong'));
 
-// Crear sesión (permite ?mode=AI|HUMAN para pruebas)
+// Crear sesión (permite ?mode=AI|HUMAN)
 app.post('/api/session', (req, res) => {
   const mode = (req.query.mode || process.env.SESSION_MODE || 'mixed').toString();
   const s = createSession(mode);
+  console.log('[SESSION] nueva', { id: s.id, condition: s.condition });
   res.json({ sessionId: s.id, condition: s.condition });
 });
 
@@ -150,6 +121,7 @@ app.post('/api/chat', async (req, res) => {
   try {
     const sessionId = getSid(req);
     const { text } = req.body || {};
+    console.log('[CHAT] req', { sessionId, text });
     if (!sessionId || !text)
       return res.status(400).json({ error: 'sessionId y text son requeridos' });
 
@@ -162,13 +134,15 @@ app.post('/api/chat', async (req, res) => {
       const history = s.messages.filter((m) => m.role !== 'ai');
       const reply = await askGemini(text, history);
       pushMessage(s, 'ai', reply);
+      console.log('[CHAT] reply IA', { sessionId, reply: reply.slice(0, 60) + '...' });
       return res.json({ reply, queued: false });
     } else {
       s.awaitingOperator = true;
+      console.log('[CHAT] queued para operador', { sessionId });
       return res.json({ queued: true });
     }
   } catch (err) {
-    console.error(err);
+    console.error('[CHAT] error', err);
     return res.status(500).json({ error: 'Error procesando el mensaje' });
   }
 });
@@ -176,14 +150,12 @@ app.post('/api/chat', async (req, res) => {
 // Poll de mensajes nuevos
 app.get('/api/messages', (req, res) => {
   const sessionId = getSid(req);
-  const a = Number(req.query.after || 0);
+  const after = Number(req.query.after || 0);
   const s = sessions.get(sessionId);
   if (!s) return res.status(404).json({ error: 'Sesión no encontrada' });
-  const news = s.messages.filter((m) => m.i > a);
-  res.json({
-    items: news,
-    awaitingOperator: isAwaitingOperator(s),
-  });
+  const news = s.messages.filter((m) => m.i > after);
+  console.log('[MESSAGES] poll', { sessionId, after, got: news.length, awaiting: isAwaitingOperator(s) });
+  res.json({ items: news, awaitingOperator: isAwaitingOperator(s) });
 });
 
 // Debrief
@@ -199,7 +171,7 @@ app.get('/debrief/:id', (req, res) => {
 });
 
 // Export
-app.get('/export', requireBasicAuth, (req, res) => {
+app.get('/export', requireBasicAuth, (_req, res) => {
   const all = [...sessions.values()];
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="sessions.json"`);
@@ -214,8 +186,7 @@ app.use(
 );
 app.use('/api/operator', requireBasicAuth);
 
-// Inbox
-app.get('/api/operator/inbox', (req, res) => {
+app.get('/api/operator/inbox', (_req, res) => {
   const items = [];
   for (const s of sessions.values()) {
     if (s.condition !== 'human') continue;
@@ -232,7 +203,6 @@ app.get('/api/operator/inbox', (req, res) => {
   res.json({ items });
 });
 
-// Ver transcript
 app.get('/api/operator/messages', (req, res) => {
   const { sessionId } = req.query;
   const s = sessions.get(sessionId);
@@ -240,7 +210,6 @@ app.get('/api/operator/messages', (req, res) => {
   res.json({ sessionId: s.id, messages: s.messages, condition: s.condition });
 });
 
-// Respuesta del operador
 app.post('/api/operator/reply', (req, res) => {
   const { sessionId, text } = req.body || {};
   const s = sessions.get(sessionId);
@@ -249,11 +218,12 @@ app.post('/api/operator/reply', (req, res) => {
   if (!text) return res.status(400).json({ error: 'Texto requerido' });
   pushMessage(s, 'human', String(text).slice(0, 2000));
   s.awaitingOperator = false;
+  console.log('[OPERATOR] reply', { sessionId, text });
   res.json({ ok: true });
 });
 
-// ---------- Debug opcional ----------
-app.get('/api/_debug/sessions', (req, res) => {
+// ---------- Debug ----------
+app.get('/api/_debug/sessions', (_req, res) => {
   res.json(
     Array.from(sessions.values()).map((s) => ({
       id: s.id,
