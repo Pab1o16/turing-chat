@@ -1,36 +1,58 @@
+// server.js
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
+import path from 'path';
 import { nanoid } from 'nanoid';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS: permitir tu dominio de Netlify (o * en dev)
-const ALLOWED_ORIGIN = process.env.CORS_ORIGIN || '*';
-app.use(cors({
-  origin: (origin, cb) => cb(null, ALLOWED_ORIGIN === '*' ? true : origin === ALLOWED_ORIGIN),
-  credentials: true
-}));
+// ---------- CORS (Netlify -> Render) ----------
+// Usa tu dominio público de Netlify en CORS_ORIGIN, p.ej. https://tuapp.netlify.app
+const ORIGIN = process.env.CORS_ORIGIN || 'https://tuapp.netlify.app';
 
+// Importante: si no usas cookies ni auth de navegador en el frontend, deja credentials:false
+app.use(
+  cors({
+    origin: ORIGIN === '*' ? true : ORIGIN,        // refleja el origin si es "*"
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: false,                             // si lo pones true, NO uses "*"
+  })
+);
+
+// Respuestas al preflight (OPTIONS) para todas las rutas
+app.options(
+  '*',
+  cors({
+    origin: ORIGIN === '*' ? true : ORIGIN,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: false,
+  })
+);
+
+// Body + logs
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan('dev'));
 
-// Protección opcional básica para /operator y /export
+// ---------- Basic Auth (opcional) ----------
 const BASIC_USER = process.env.BASIC_AUTH_USER || null;
 const BASIC_PASS = process.env.BASIC_AUTH_PASS || null;
 function requireBasicAuth(req, res, next) {
   if (!BASIC_USER || !BASIC_PASS) return next();
   const header = req.headers.authorization || '';
   const [type, b64] = header.split(' ');
-  if (type !== 'Basic' || !b64) return res.status(401).set('WWW-Authenticate', 'Basic').send('Auth requerida');
+  if (type !== 'Basic' || !b64)
+    return res.status(401).set('WWW-Authenticate', 'Basic').send('Auth requerida');
   const [u, p] = Buffer.from(b64, 'base64').toString().split(':');
   if (u === BASIC_USER && p === BASIC_PASS) return next();
   return res.status(401).set('WWW-Authenticate', 'Basic').send('Credenciales inválidas');
 }
 
-// --- Memoria en RAM ---
+// ---------- Memoria en RAM ----------
 /**
  * sessions Map: id -> {
  *   id, condition: 'AI'|'human', createdAt, messages: [{i,role:'user'|'ai'|'human',text,t}],
@@ -38,50 +60,64 @@ function requireBasicAuth(req, res, next) {
  * }
  */
 const sessions = new Map();
-let globalIndex = 0; // contador para messages.i
+let globalIndex = 0;
 
-// Utilidades
-function createSession() {
+function createSession(mode = process.env.SESSION_MODE || 'mixed') {
   const id = nanoid(10);
-  const condition = Math.random() < 0.5 ? 'AI' : 'human';
-  const s = { id, condition, createdAt: new Date().toISOString(), messages: [], awaitingOperator: false };
+  const pick =
+    mode.toUpperCase() === 'AI'
+      ? 'AI'
+      : mode.toUpperCase() === 'HUMAN'
+      ? 'human'
+      : Math.random() < 0.5
+      ? 'AI'
+      : 'human';
+
+  const s = {
+    id,
+    condition: pick,
+    createdAt: new Date().toISOString(),
+    messages: [],
+    awaitingOperator: false,
+  };
   sessions.set(id, s);
   return s;
 }
+
 function pushMessage(session, role, text) {
   const msg = { i: ++globalIndex, role, text, t: new Date().toISOString() };
   session.messages.push(msg);
   return msg;
 }
+
 function isAwaitingOperator(session) {
   if (session.condition !== 'human') return false;
   const last = session.messages[session.messages.length - 1];
   return !!last && last.role === 'user';
 }
 
-// Gemini proxy (o stub)
+// ---------- IA (Gemini) ----------
 async function askGemini(prompt, history = []) {
-  // Si no hay API key -> responder stub
   if (!process.env.GEMINI_API_KEY) {
-    return `🧪 (Stub IA) Me pediste: "${prompt}". Si configuras GEMINI_API_KEY responderé con Gemini.`;
+    return `🧪 (Stub IA) Me pediste: "${prompt}". Configura GEMINI_API_KEY para usar Gemini.`;
   }
-
-  // API Gemini (modelo rápido y económico)
   const apiKey = process.env.GEMINI_API_KEY;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  const url =
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' +
+    apiKey;
 
   const contents = [
-    ...history.map(h => ({
+    ...history.map((h) => ({
       role: h.role === 'user' ? 'user' : 'model',
-      parts: [{ text: h.text }]
+      parts: [{ text: h.text }],
     })),
-    { role: 'user', parts: [{ text: prompt }] }
+    { role: 'user', parts: [{ text: prompt }] },
   ];
 
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents })
+    body: JSON.stringify({ contents }),
   });
   if (!r.ok) {
     const txt = await r.text();
@@ -89,32 +125,41 @@ async function askGemini(prompt, history = []) {
   }
   const data = await r.json();
   const text =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
-    'No obtuve respuesta del modelo.';
+    data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || 'No obtuve respuesta del modelo.';
   return text;
 }
 
-// --- Rutas públicas ---
+// ---------- Helpers ----------
+const getSid = (req) =>
+  req.query.sessionId ||
+  req.query.session ||
+  (req.body && (req.body.sessionId || req.body.session));
+
+// ---------- Rutas públicas ----------
 app.get('/', (req, res) => res.send('pong'));
 
-// Crear sesión
+// Crear sesión (permite ?mode=AI|HUMAN para pruebas)
 app.post('/api/session', (req, res) => {
-  const s = createSession();
-  res.json({ sessionId: s.id });
+  const mode = (req.query.mode || process.env.SESSION_MODE || 'mixed').toString();
+  const s = createSession(mode);
+  res.json({ sessionId: s.id, condition: s.condition });
 });
 
 // Enviar mensaje desde el cliente
 app.post('/api/chat', async (req, res) => {
   try {
-    const { sessionId, text } = req.body || {};
-    if (!sessionId || !text) return res.status(400).json({ error: 'sessionId y text son requeridos' });
+    const sessionId = getSid(req);
+    const { text } = req.body || {};
+    if (!sessionId || !text)
+      return res.status(400).json({ error: 'sessionId y text son requeridos' });
+
     const s = sessions.get(sessionId);
     if (!s) return res.status(404).json({ error: 'Sesión no encontrada' });
 
-    pushMessage(s, 'user', String(text).slice(0, 2000)); // límite sencillo
+    pushMessage(s, 'user', String(text).slice(0, 2000));
 
     if (s.condition === 'AI') {
-      const history = s.messages.filter(m => m.role !== 'ai');
+      const history = s.messages.filter((m) => m.role !== 'ai');
       const reply = await askGemini(text, history);
       pushMessage(s, 'ai', reply);
       return res.json({ reply, queued: false });
@@ -128,20 +173,20 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-// Poll de mensajes nuevos del cliente (después del índice i)
+// Poll de mensajes nuevos
 app.get('/api/messages', (req, res) => {
-  const { sessionId, after } = req.query;
+  const sessionId = getSid(req);
+  const a = Number(req.query.after || 0);
   const s = sessions.get(sessionId);
   if (!s) return res.status(404).json({ error: 'Sesión no encontrada' });
-  const a = Number(after || 0);
-  const news = s.messages.filter(m => m.i > a);
+  const news = s.messages.filter((m) => m.i > a);
   res.json({
     items: news,
-    awaitingOperator: isAwaitingOperator(s)
+    awaitingOperator: isAwaitingOperator(s),
   });
 });
 
-// Debrief: revelar condición y transcript
+// Debrief
 app.get('/debrief/:id', (req, res) => {
   const s = sessions.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'Sesión no encontrada' });
@@ -149,11 +194,11 @@ app.get('/debrief/:id', (req, res) => {
     sessionId: s.id,
     condition: s.condition,
     createdAt: s.createdAt,
-    transcript: s.messages
+    transcript: s.messages,
   });
 });
 
-// Exportar todas las sesiones
+// Export
 app.get('/export', requireBasicAuth, (req, res) => {
   const all = [...sessions.values()];
   res.setHeader('Content-Type', 'application/json');
@@ -161,20 +206,25 @@ app.get('/export', requireBasicAuth, (req, res) => {
   res.send(JSON.stringify(all, null, 2));
 });
 
-// --- Panel de operador (en el backend) ---
-app.use('/operator', requireBasicAuth, express.static('public'));
+// ---------- Panel de operador ----------
+app.use(
+  '/operator',
+  requireBasicAuth,
+  express.static(path.join(process.cwd(), 'public'), { index: 'operator.html' })
+);
+app.use('/api/operator', requireBasicAuth);
 
-// Listado de sesiones humanas con mensajes por responder
-app.get('/api/operator/inbox', requireBasicAuth, (req, res) => {
+// Inbox
+app.get('/api/operator/inbox', (req, res) => {
   const items = [];
   for (const s of sessions.values()) {
     if (s.condition !== 'human') continue;
     if (isAwaitingOperator(s)) {
-      const lastUser = [...s.messages].reverse().find(m => m.role === 'user');
+      const lastUser = [...s.messages].reverse().find((m) => m.role === 'user');
       items.push({
         sessionId: s.id,
         lastUserText: lastUser?.text || '',
-        lastAt: lastUser?.t || s.createdAt
+        lastAt: lastUser?.t || s.createdAt,
       });
     }
   }
@@ -182,16 +232,16 @@ app.get('/api/operator/inbox', requireBasicAuth, (req, res) => {
   res.json({ items });
 });
 
-// Ver transcript completo de una sesión
-app.get('/api/operator/messages', requireBasicAuth, (req, res) => {
+// Ver transcript
+app.get('/api/operator/messages', (req, res) => {
   const { sessionId } = req.query;
   const s = sessions.get(sessionId);
   if (!s) return res.status(404).json({ error: 'Sesión no encontrada' });
   res.json({ sessionId: s.id, messages: s.messages, condition: s.condition });
 });
 
-// Enviar respuesta del operador (humano)
-app.post('/api/operator/reply', requireBasicAuth, (req, res) => {
+// Respuesta del operador
+app.post('/api/operator/reply', (req, res) => {
   const { sessionId, text } = req.body || {};
   const s = sessions.get(sessionId);
   if (!s) return res.status(404).json({ error: 'Sesión no encontrada' });
@@ -202,7 +252,19 @@ app.post('/api/operator/reply', requireBasicAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// Iniciar
+// ---------- Debug opcional ----------
+app.get('/api/_debug/sessions', (req, res) => {
+  res.json(
+    Array.from(sessions.values()).map((s) => ({
+      id: s.id,
+      condition: s.condition,
+      msgs: s.messages.length,
+      awaitingOperator: s.awaitingOperator,
+    }))
+  );
+});
+
+// ---------- Arranque ----------
 app.listen(PORT, () => {
   console.log(`Backend on http://localhost:${PORT}`);
 });
