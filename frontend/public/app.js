@@ -1,5 +1,5 @@
 // ⚠️ Cambia esto por tu URL pública del backend en Render:
-const API_BASE = "https://turing-mini-ggup.onrender.com";
+const API_BASE = "https://turing-chat.onrender.com";
 
 const chatEl = document.getElementById('chat');
 const form = document.getElementById('form');
